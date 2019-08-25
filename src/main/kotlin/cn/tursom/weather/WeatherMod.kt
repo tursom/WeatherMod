@@ -19,20 +19,29 @@ import cn.tursom.utils.cache.AsyncSoftCacheMap
 import cn.tursom.utils.cache.AsyncSqlStringCacheMap
 import cn.tursom.utils.fromJson
 import cn.tursom.utils.xml.Xml
+import cn.tursom.weather.json.Daily
 import cn.tursom.weather.json.WeatherJson
 import cn.tursom.web.HttpContent
+import com.google.gson.JsonParser
 import kotlinx.coroutines.delay
 import java.util.logging.Level
 import java.util.logging.Logger
 
 @RegisterService
-@ModPath("weather", "weather/:city", "weather/json", "weather/:json/:city")
+@ModPath("weather", "weather/:city", "weather/:json/:city")
 @ModDescription("获取天气")
 @ModHelper("""@param """)
 class WeatherMod : Module() {
+  private val jp = JsonParser()
   private val bytesCacheMap by lazy { AsyncSoftCacheMap<String, ByteArray>(config.cacheTime) }
   private val stringCacheMap by lazy {
-    AsyncSqlStringCacheMap(database, config.cacheTime, table = "weather", logger = logger)
+    AsyncSqlStringCacheMap(
+      database,
+      config.cacheTime,
+      table = "weather",
+      logger = logger,
+      prevCacheMap = AsyncSoftCacheMap(config.cacheTime)
+    )
   }
   private val objectCacheMap by lazy { AsyncSoftCacheMap<String, WeatherJson>(config.cacheTime) }
   private val database by lazy { AsyncSqliteHelper("${modPath}weather.db") }
@@ -72,7 +81,7 @@ class WeatherMod : Module() {
       ?: caller?.call(content) as String?
       ?: throw ModException("需要提供城市名")
     return when {
-      content.uri == "${modUrlBase}weather/json" || content["json"] != null -> getBytesData(city, environment.logger)
+      content["city"] == "json" || content["json"] != null -> getBytesData(city, environment.logger)
       else -> try {
         generateStr(getObjectData(city, environment.logger)).toByteArray()
       } catch (e: Exception) {
@@ -88,7 +97,7 @@ class WeatherMod : Module() {
       content.usingCache()
     } else {
       content.setCacheTag(System.currentTimeMillis())
-      if (content.uri == "${modUrlBase}weather/json" || content["json"] != null) {
+      if (content["city"] == "json" || content["json"] != null) {
         content.finishJson(handle(content, environment))
       } else {
         content.finishText(handle(content, environment))
@@ -97,11 +106,7 @@ class WeatherMod : Module() {
   }
 
   private suspend fun getBytesData(city: String, logger: Logger): ByteArray {
-    val cached = bytesCacheMap.get(city)
-    if (cached != null) return cached
-    val newCache = getStringData(city, logger).toByteArray()
-    bytesCacheMap.set(city, newCache)
-    return newCache
+    return getStringData(city, logger).toByteArray()
   }
 
   private suspend fun getStringData(city: String, logger: Logger): String {
@@ -111,7 +116,7 @@ class WeatherMod : Module() {
   private suspend fun updateCache(city: String, logger: Logger): String {
     logger.log(Level.INFO, "WeatherMod update cache, city: $city")
     return try {
-      AsyncHttpRequest.getStr(
+      val str = AsyncHttpRequest.getStr(
         config.url,
         mapOf(
           "area" to city,
@@ -123,6 +128,8 @@ class WeatherMod : Module() {
         ),
         mapOf("Authorization" to "APPCODE ${config.APPCODE}")
       )
+      val je = jp.parse(str)
+      prettyGson.toJson(je)
     } catch (e: Exception) {
       e.printStackTrace()
       "{}"
@@ -130,14 +137,7 @@ class WeatherMod : Module() {
   }
 
   private suspend fun getObjectData(city: String, logger: Logger): WeatherJson {
-    val cachedData = objectCacheMap.get(city)
-    if (cachedData != null) {
-      return cachedData
-    }
-
-    val newObject = gson.fromJson<WeatherJson>(getStringData(city, logger))
-    objectCacheMap.set(city, newObject)
-    return newObject
+    return objectCacheMap.get(city) { gson.fromJson(getStringData(city, logger)) }
   }
 
   private fun generateStr(weatherJson: WeatherJson): String {
@@ -163,16 +163,25 @@ class WeatherMod : Module() {
     val today = body.now
     sb.append("${today.temperature_time}：${today.weather}，${today.wind_direction}${today.wind_power}\n")
 
-    val nextDay = body.f2
-    val nextDatStr = nextDay.day
-    sb.append(
-      "${nextDatStr.take(4)}年${
-      nextDatStr.filterIndexed { index, _ -> index == 4 || index == 5 }}月${
-      nextDatStr.takeLast(2)}日：\n白天：${
-      nextDay.day_weather}，${nextDay.day_wind_direction}${nextDay.day_wind_power
-      }\n黑天：${nextDay.night_weather}，${nextDay.night_wind_direction}${nextDay.night_wind_power}"
-    )
+    appendDate(sb, body.f1)
+    appendDate(sb, body.f2)
+    appendDate(sb, body.f3)
+    appendDate(sb, body.f4)
+    appendDate(sb, body.f5)
+    appendDate(sb, body.f6)
+    appendDate(sb, body.f7)
 
     return sb.toString()
+  }
+
+  private fun appendDate(stringBuilder: StringBuilder, daily: Daily) {
+    val dailyStr = daily.day
+    stringBuilder.append(
+      "${dailyStr.take(4)}年${
+      dailyStr.filterIndexed { index, _ -> index == 4 || index == 5 }}月${
+      dailyStr.takeLast(2)}日：\n白天：${
+      daily.day_weather}，${daily.day_wind_direction}${daily.day_wind_power
+      }\n黑天：${daily.night_weather}，${daily.night_wind_direction}${daily.night_wind_power}\n"
+    )
   }
 }

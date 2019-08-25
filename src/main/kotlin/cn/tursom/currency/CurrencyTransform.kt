@@ -14,6 +14,7 @@ import cn.tursom.treediagram.module.Module
 import cn.tursom.utils.AsyncFile
 import cn.tursom.utils.AsyncHttpRequest
 import cn.tursom.utils.bytebuffer.ByteArrayAdvanceByteBuffer
+import cn.tursom.utils.cache.AsyncSoftCacheMap
 import cn.tursom.utils.cache.AsyncSqlStringCacheMap
 import cn.tursom.utils.fromJson
 import cn.tursom.utils.xml.Xml
@@ -21,6 +22,9 @@ import cn.tursom.web.HttpContent
 import java.util.logging.Level
 import java.util.logging.Logger
 import com.google.gson.JsonParser
+import java.io.PrintStream
+import java.io.PrintWriter
+import java.io.StringWriter
 
 
 @ModPath(
@@ -36,8 +40,16 @@ import com.google.gson.JsonParser
   amount => 数量，默认为0"""
 )
 class CurrencyTransform : Module() {
+  private val jp = JsonParser()
   private val database by lazy { AsyncSqliteHelper("${modPath}currency.db") }
-  private val convertCacheMap by lazy { AsyncSqlStringCacheMap(database, config.cacheTime, "convert") }
+  private val convertCacheMap by lazy {
+    AsyncSqlStringCacheMap(
+      database,
+      config.cacheTime,
+      "convert",
+      prevCacheMap = AsyncSoftCacheMap(config.cacheTime)
+    )
+  }
   private val currencyCacheMap by lazy { AsyncSqlStringCacheMap(database, config.cacheTime, "currency") }
 
   lateinit var countries: Map<String, String>
@@ -70,20 +82,25 @@ class CurrencyTransform : Module() {
       from == null -> countries
       to == null -> handleSingle(from)
       amount == null ->
-        gson.fromJson<ConvertResult>(convertCacheMap.get("${countries[from] ?: from} to ${countries[to] ?: to}") {
-          AsyncHttpRequest.getStr(
-            config.convert,
-            mapOf("from" to (countries[from] ?: from), "to" to (countries[to] ?: to), "amount" to "1"),
-            mapOf("Authorization" to "APPCODE ${config.APPCODE}")
-          )
-        }).result
+        prettyGson.toJson(
+          gson.fromJson<ConvertResult>(
+            convertCacheMap.get(
+              "${countries[from] ?: from} to ${countries[to] ?: to}"
+            ) {
+              AsyncHttpRequest.getStr(
+                config.convert,
+                mapOf("from" to (countries[from] ?: from), "to" to (countries[to] ?: to), "amount" to "1"),
+                mapOf("Authorization" to "APPCODE ${config.APPCODE}")
+              )
+            }).result
+        )
       else -> convert(from, to, amount)
     }
   }
 
   override suspend fun bottomHandle(content: HttpContent, environment: Environment) {
     val cacheTime = content.getCacheTag()?.toLongOrNull()
-    if (cacheTime != null && cacheTime + 1000 * 60 * 60 > System.currentTimeMillis()) {
+    if (cacheTime != null && cacheTime + config.cacheTime > System.currentTimeMillis()) {
       content.usingCache()
     } else {
       content.setCacheTag(System.currentTimeMillis())
@@ -104,9 +121,14 @@ class CurrencyTransform : Module() {
         mapOf("currency" to (countries[currency] ?: currency)),
         mapOf("Authorization" to "APPCODE ${config.APPCODE}")
       )
-      val jp = JsonParser()
       val je = jp.parse(str)
-      prettyGson.toJson(je)
+      try {
+        prettyGson.toJson(je.asJsonObject["result"].asJsonObject)
+      } catch (e: Exception) {
+        val writer = StringWriter()
+        e.printStackTrace(PrintWriter(writer))
+        writer.toString()
+      }
     }
   }
 
