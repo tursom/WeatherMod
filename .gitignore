@@ -1,0 +1,10 @@
+gradlew
+gradlew.bat
+*.db
+*.xml
+gradle
+.gradle
+.idea
+build
+mods
+src/test
